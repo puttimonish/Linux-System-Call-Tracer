@@ -1,0 +1,4 @@
+*.o
+/syscall_tracer
+__pycache__/
+*.pyc

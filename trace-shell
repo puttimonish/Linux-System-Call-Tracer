@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT" || exit 1
+STORE="$ROOT/data/command_history"
+COMMANDS="$STORE/commands.tsv"
+EVENTS="$STORE/events"
+mkdir -p "$STORE" "$EVENTS"
+touch "$COMMANDS"
+
+show_history() {
+  if [[ ! -s "$COMMANDS" ]]; then
+    echo "No commands recorded yet."
+    return
+  fi
+  printf '%-20s %-24s %-6s %s\n' "TIME" "SESSION" "STATUS" "COMMAND"
+  while IFS=$'\t' read -r time session status file command; do
+    printf '%-20s %-24s %-6s %s\n' "$time" "$session" "$status" "$command"
+  done < "$COMMANDS"
+}
+
+search_syscall() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || { echo "Usage: syscall NAME"; return; }
+  local found=0
+  while IFS= read -r -d '' file; do
+    if grep -i -n -- "$name" "$file"; then
+      echo "Source: $file"
+      found=1
+    fi
+  done < <(find "$EVENTS" -maxdepth 1 -type f -name '*.log' -print0)
+  [[ "$found" -eq 1 ]] || echo "No saved matching events. Run a command first."
+}
+
+details() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || { echo "Usage: details SYSCALL_NAME"; return; }
+  local found=0
+  while IFS= read -r -d '' file; do
+    if grep -i -n -F "name=$name " "$file"; then
+      echo "Source: $file"
+      found=1
+    fi
+  done < <(find "$EVENTS" -maxdepth 1 -type f -name '*.log' -print0)
+  [[ "$found" -eq 1 ]] || echo "No detailed records found for $name."
+}
+
+cat <<'HELP'
+Interactive Linux System Call Tracer
+Type regular commands at the prompt:
+  pwd
+  whoami
+  ls -la
+  mkdir tracer_test
+  touch tracer_test/notes.txt
+  cat tracer_test/notes.txt
+  echo "hello" > tracer_test/notes.txt
+
+Inspect saved activity:
+  history             List recorded commands
+  syscall openat      Search saved syscall records
+  syscall write
+  details openat      Show matching entry/exit records
+  details mmap
+  help
+  exit
+
+Notes:
+- Commands are passed directly to the tracer, not through /bin/bash -c.
+- cd changes this shell's directory and is recorded as a shell built-in.
+- Basic command arguments and simple > or >> redirection are supported.
+- Pipelines, &&, and complex shell syntax are not supported by this prompt.
+HELP
+
+while true; do
+  printf 'trace:%s$ ' "${PWD/#$ROOT/~}"
+  IFS= read -r line || break
+  [[ -z "${line//[[:space:]]/}" ]] && continue
+
+  case "$line" in
+    exit|quit) echo "Session ended."; break ;;
+    help) cat <<'HELP'
+Commands: pwd, whoami, ls, cat, mkdir, touch, cp, mv, rm, ps
+History: history
+Search: syscall openat
+Detailed activity: details openat
+Leave: exit
+HELP
+      continue ;;
+    history) show_history; continue ;;
+    "syscall "*) search_syscall "${line#syscall }"; continue ;;
+    "details "*) details "${line#details }"; continue ;;
+    cd|cd\ *)
+      target="${line#cd}"
+      target="${target# }"
+      [[ -n "$target" ]] || target="$HOME"
+      if [[ "$target" == "-" ]]; then
+        cd - || true
+      else
+        # Support a simple quoted path.
+        target="${target%\"}"; target="${target#\"}"
+        target="${target%\'}"; target="${target#\'}"
+        cd -- "$target" || echo "cd failed."
+      fi
+      printf '%s\t%s\t0\t%s\t%s\n' \
+        "$(date --iso-8601=seconds)" "builtin" "BUILTIN_CD_NOT_TRACED" "$line" >> "$COMMANDS"
+      continue ;;
+  esac
+
+  python3 "$ROOT/scripts/interactive_trace.py" "$line"
+done
